@@ -1,0 +1,25 @@
+{
+  "name": "axxa-connect",
+  "version": "0.1.0",
+  "description": "Obsidian plugin to sync your vault to Cloudflare R2 (S3) as plain files.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+    "version": "node version-bump.mjs && git add manifest.json versions.json"
+  },
+  "keywords": ["obsidian", "obsidian-plugin", "cloudflare", "r2", "s3", "sync", "backup"],
+  "author": "AXXA Studio Lab",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/axxalab/axxa-connect.git"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.21.5",
+    "obsidian": "^1.5.7",
+    "tslib": "^2.6.2",
+    "typescript": "^5.4.5"
+  }
+}

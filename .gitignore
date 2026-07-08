@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Build output is committed (main.js) so users can install without building.
+# Remove the line below if you prefer to ship main.js only via Releases.
+# main.js
+
+# Local / editor
+.DS_Store
+*.log
+data.json
+.env

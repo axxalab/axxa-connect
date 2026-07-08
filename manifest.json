@@ -1,0 +1,10 @@
+{
+  "id": "axxa-connect",
+  "name": "Axxa Connect",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Connect your vault to Cloudflare R2 (S3-compatible) storage. Plain-file sync — no encryption, no chunks — so notes stay readable by other tools and AIs.",
+  "author": "AXXA Studio Lab",
+  "authorUrl": "https://axxalab.io",
+  "isDesktopOnly": false
+}
