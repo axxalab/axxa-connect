@@ -272,6 +272,7 @@ export default class AxxaConnectPlugin extends Plugin {
     let removed = 0;
     let conflicts = 0;
     let errors = 0;
+    let firstError = '';
     try {
       // 1) Snapshot dos dois lados: uma listagem remota + varredura local.
       const remoteMap = new Map<string, R2Object>();
@@ -376,6 +377,7 @@ export default class AxxaConnectPlugin extends Plugin {
           } catch (e) {
             console.error(`Axxa Connect: sync op failed (${op.kind} ${op.path})`, e);
             errors++;
+            if (!firstError) firstError = (e as Error).message;
           } finally {
             notice.setMessage(`Axxa Connect: syncing… ${++done}/${ops.length}`);
           }
@@ -395,7 +397,8 @@ export default class AxxaConnectPlugin extends Plugin {
         `Axxa Connect: sync done — ↑${pushed} ↓${pulled}` +
           `${removed ? `, 🗑${removed}` : ''}` +
           `${conflicts ? `, ${conflicts} conflict(s)` : ''}` +
-          `${errors ? `, ${errors} error(s)` : ''}.`,
+          `${errors ? `, ${errors} error(s) — ${firstError}` : ''}.`,
+        errors ? 15000 : undefined,
       );
     } catch (e) {
       console.error('Axxa Connect: sync failed', e);
