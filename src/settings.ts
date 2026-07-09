@@ -10,6 +10,7 @@ export interface AxxaConnectSettings {
   region: string;
   syncOnSave: boolean;
   includeNonMarkdown: boolean;
+  propagateDeletes: boolean;
 }
 
 export const DEFAULT_SETTINGS: AxxaConnectSettings = {
@@ -21,6 +22,7 @@ export const DEFAULT_SETTINGS: AxxaConnectSettings = {
   region: 'auto',
   syncOnSave: false,
   includeNonMarkdown: false,
+  propagateDeletes: true,
 };
 
 // Normalizes the prefix: no leading slash, trailing slash when non-empty.
@@ -100,6 +102,16 @@ export class AxxaConnectSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(this.plugin.settings.includeNonMarkdown).onChange(async (v) => {
           this.plugin.settings.includeNonMarkdown = v;
+          await save();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('Propagate moves & deletions')
+      .setDesc('When a file is moved or deleted on one device, apply the same change on the other side (two-way). Local deletions go to the vault trash (recoverable). Turn off to never delete/move — files are only ever added or updated.')
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.propagateDeletes).onChange(async (v) => {
+          this.plugin.settings.propagateDeletes = v;
           await save();
         }),
       );

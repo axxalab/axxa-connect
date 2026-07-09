@@ -11,7 +11,11 @@ never leave the app.
 ## Features
 
 - **Two-way sync** with Cloudflare R2 (or any S3-compatible endpoint) — one button
-  sends and receives only what changed since the last sync
+  sends and receives only what changed since the last sync, running transfers in
+  parallel for speed
+- **Move & delete propagation** — moving or deleting a file on one device applies
+  the same change on the other (three-way diff: local × remote × last-sync state),
+  so you never end up with duplicate copies. Can be turned off in settings.
 - Push the current note, or the whole vault, to R2
 - Pull the whole vault from R2
 - Optional **push on save** (debounced)
@@ -87,11 +91,16 @@ enables automatic per-file upload.
 - Two-way sync tracks changes with the local file's modified time and the remote
   ETag. Conflicts (a file changed on **both** sides since the last sync) are
   resolved **last-write-wins by newest timestamp** — there is no line-level merge.
-- Deletions are **not** propagated. Deleting a note on one side does not remove it
-  on the other; on the next sync it is treated as a new file and re-created. Delete
-  it on both sides (or clear the bucket) if you really want it gone.
+- Moves and deletions are propagated using each device's **last-sync state**
+  (stored in `data.json`). If that state is missing (fresh install, or the file
+  was never synced from this device), a deletion on the other side can't be told
+  apart from a brand-new file, so the file is re-created instead of removed — a
+  safe fallback that never loses data. Local deletions are moved to the vault
+  **trash**, so they're recoverable.
+- A move is handled as delete-at-old-path + create-at-new-path. On R2 (like S3)
+  there is no atomic rename, so the object is re-uploaded under the new key.
 
-Deletion propagation and content-hash change detection are on the roadmap.
+Content-hash change detection is on the roadmap.
 
 ## License
 

@@ -15,6 +15,13 @@ interface SyncEntry {
 }
 type SyncState = Record<string, SyncEntry>;
 
+// Operação decidida na fase de comparação, executada em paralelo depois.
+type SyncOp =
+  | { kind: 'push'; path: string; file: TFile }
+  | { kind: 'pull'; path: string; remote: R2Object }
+  | { kind: 'delRemote'; path: string; remote: R2Object }
+  | { kind: 'delLocal'; path: string; file: TFile };
+
 export default class AxxaConnectPlugin extends Plugin {
   settings!: AxxaConnectSettings;
   syncState: SyncState = {};
@@ -184,9 +191,12 @@ export default class AxxaConnectPlugin extends Plugin {
     }
   }
 
-  // Sincronização bidirecional. Compara o estado atual dos dois lados com o
-  // último sync registrado e move só o que mudou. Conflitos (mudou dos dois
-  // lados) são resolvidos por "mais recente vence". Nada é apagado.
+  // Sincronização bidirecional com propagação de movimentações/exclusões.
+  // Comparação de três vias: estado ATUAL local × remoto × ESTADO do último
+  // sync. Isso permite distinguir "arquivo novo" de "arquivo apagado/movido":
+  // uma movimentação = apagar no caminho antigo + criar no novo, e ambos os
+  // lados convergem para o mesmo caminho (sem cópias duplicadas). As operações
+  // rodam em paralelo (rápido) e só transfere o que mudou (incremental).
   async syncAll() {
     if (this.syncing) {
       new Notice('Axxa Connect: a sync is already running.');
@@ -199,68 +209,115 @@ export default class AxxaConnectPlugin extends Plugin {
     const notice = new Notice('Axxa Connect: syncing…', 0);
     let pushed = 0;
     let pulled = 0;
+    let removed = 0;
     let conflicts = 0;
     let errors = 0;
     try {
-      const remoteObjs = await r2.list('');
+      // 1) Snapshot dos dois lados: uma listagem remota + varredura local.
       const remoteMap = new Map<string, R2Object>();
-      for (const o of remoteObjs) {
+      for (const o of await r2.list('')) {
         const rel = normalizePath(r2.stripPrefix(o.key));
         if (!rel || rel.endsWith('/')) continue;
         if (!rel.endsWith('.md') && !this.settings.includeNonMarkdown) continue;
         remoteMap.set(rel, o);
       }
-
       const localMap = new Map<string, TFile>();
       for (const f of this.app.vault.getFiles()) if (this.shouldSync(f)) localMap.set(f.path, f);
 
-      const paths = new Set<string>([...localMap.keys(), ...remoteMap.keys()]);
+      // 2) Decide a operação de cada caminho.
+      const propagate = this.settings.propagateDeletes;
+      const ops: SyncOp[] = [];
+      const paths = new Set<string>([
+        ...localMap.keys(),
+        ...remoteMap.keys(),
+        ...Object.keys(this.syncState),
+      ]);
       for (const path of paths) {
         const local = localMap.get(path);
         const remote = remoteMap.get(path);
         const state = this.syncState[path];
+        const localChanged = local ? !state || local.stat.mtime !== state.localMtime : false;
+        const remoteChanged = remote ? !state || remote.etag !== state.remoteEtag : false;
+
+        if (local && remote) {
+          if (localChanged && remoteChanged) {
+            conflicts++;
+            ops.push(
+              local.stat.mtime >= remote.lastModified
+                ? { kind: 'push', path, file: local }
+                : { kind: 'pull', path, remote },
+            );
+          } else if (localChanged) {
+            ops.push({ kind: 'push', path, file: local });
+          } else if (remoteChanged) {
+            ops.push({ kind: 'pull', path, remote });
+          } else if (!state) {
+            // Idênticos e sem estado (primeiro sync) → só registra a baseline.
+            this.syncState[path] = { localMtime: local.stat.mtime, remoteEtag: remote.etag };
+          }
+        } else if (local && !remote) {
+          if (state && propagate && !localChanged) {
+            // Existia remotamente e sumiu → foi apagado/movido no outro lado.
+            ops.push({ kind: 'delLocal', path, file: local });
+          } else if (state && propagate && localChanged) {
+            // Conflito apagar-vs-editar → preserva o local (re-envia).
+            conflicts++;
+            ops.push({ kind: 'push', path, file: local });
+          } else {
+            // Arquivo novo local (ou propagação desligada) → envia.
+            ops.push({ kind: 'push', path, file: local });
+          }
+        } else if (!local && remote) {
+          if (state && propagate && !remoteChanged) {
+            // Existia localmente e sumiu → foi apagado/movido aqui → apaga remoto.
+            ops.push({ kind: 'delRemote', path, remote });
+          } else if (state && propagate && remoteChanged) {
+            // Conflito apagar-vs-editar → preserva o remoto (baixa).
+            conflicts++;
+            ops.push({ kind: 'pull', path, remote });
+          } else {
+            // Arquivo novo remoto (ou propagação desligada) → baixa.
+            ops.push({ kind: 'pull', path, remote });
+          }
+        } else {
+          // Não existe em lugar nenhum, só no estado → limpa.
+          delete this.syncState[path];
+        }
+      }
+
+      // 3) Executa em paralelo com limite de concorrência.
+      let done = 0;
+      await this.runPool(ops, 6, async (op) => {
         try {
-          if (local && !remote) {
-            // Só existe local: arquivo novo → envia.
-            await this.pushOne(r2, local);
+          if (op.kind === 'push') {
+            await this.pushOne(r2, op.file);
             pushed++;
-          } else if (!local && remote) {
-            // Só existe remoto: arquivo novo → baixa.
-            await this.pullOne(r2, path, remote);
+          } else if (op.kind === 'pull') {
+            await this.pullOne(r2, op.path, op.remote);
             pulled++;
-          } else if (local && remote) {
-            const localChanged = !state || local.stat.mtime !== state.localMtime;
-            const remoteChanged = !state || remote.etag !== state.remoteEtag;
-            if (localChanged && !remoteChanged) {
-              await this.pushOne(r2, local);
-              pushed++;
-            } else if (remoteChanged && !localChanged) {
-              await this.pullOne(r2, path, remote);
-              pulled++;
-            } else if (localChanged && remoteChanged) {
-              conflicts++;
-              if (local.stat.mtime >= remote.lastModified) {
-                await this.pushOne(r2, local);
-                pushed++;
-              } else {
-                await this.pullOne(r2, path, remote);
-                pulled++;
-              }
-            }
-            // else: nada mudou → mantém o estado como está.
+          } else if (op.kind === 'delRemote') {
+            await r2.del(op.path);
+            delete this.syncState[op.path];
+            removed++;
+          } else if (op.kind === 'delLocal') {
+            await this.trashLocal(op.path);
+            delete this.syncState[op.path];
+            removed++;
           }
         } catch (e) {
-          console.error(`Axxa Connect: sync error on ${path}`, e);
+          console.error(`Axxa Connect: sync op failed (${op.kind} ${op.path})`, e);
           errors++;
+        } finally {
+          notice.setMessage(`Axxa Connect: syncing… ${++done}/${ops.length}`);
         }
-        notice.setMessage(`Axxa Connect: syncing… ↑${pushed} ↓${pulled}`);
-      }
+      });
 
       await this.persist();
       notice.hide();
       new Notice(
-        `Axxa Connect: sync done — ↑${pushed} sent, ↓${pulled} received` +
-          `${conflicts ? `, ${conflicts} conflict(s) kept newest` : ''}` +
+        `Axxa Connect: sync done — ↑${pushed} ↓${pulled}` +
+          `${removed ? `, 🗑${removed}` : ''}` +
+          `${conflicts ? `, ${conflicts} conflict(s)` : ''}` +
           `${errors ? `, ${errors} error(s)` : ''}.`,
       );
     } catch (e) {
@@ -270,6 +327,25 @@ export default class AxxaConnectPlugin extends Plugin {
     } finally {
       this.syncing = false;
     }
+  }
+
+  // Roda `worker` sobre os itens com no máximo `limit` operações simultâneas.
+  private async runPool<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+    let i = 0;
+    const next = async (): Promise<void> => {
+      while (i < items.length) await worker(items[i++]);
+    };
+    const runners: Promise<void>[] = [];
+    for (let k = 0; k < Math.min(limit, items.length); k++) runners.push(next());
+    await Promise.all(runners);
+  }
+
+  // Move um arquivo local para a lixeira do vault (recuperável, funciona no
+  // mobile). Cai para remoção direta se o arquivo não for um TAbstractFile.
+  private async trashLocal(path: string) {
+    const af = this.app.vault.getAbstractFileByPath(path);
+    if (af) await this.app.vault.trash(af, false);
+    else if (await this.app.vault.adapter.exists(path)) await this.app.vault.adapter.remove(path);
   }
 
   // Envia um arquivo e registra o estado (mtime local + ETag remoto).
