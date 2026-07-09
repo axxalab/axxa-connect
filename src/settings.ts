@@ -114,10 +114,36 @@ export class AxxaConnectSettingTab extends PluginSettingTab {
         }),
       );
 
+    containerEl.createEl('h3', { text: 'Actions' });
+
+    new Setting(containerEl)
+      .setName('Sync now')
+      .setDesc('Two-way sync: sends and receives only what changed. Conflicts keep the newest version. Nothing is deleted.')
+      .addButton((b) =>
+        b.setButtonText('Sync').setCta().onClick(async () => {
+          await this.plugin.syncAll();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('Push / Pull everything')
+      .setDesc('Force upload the whole vault, or overwrite the local vault with what is in R2.')
+      .addButton((b) =>
+        b.setButtonText('Push all').onClick(async () => {
+          await this.plugin.pushAll();
+        }),
+      )
+      .addButton((b) =>
+        b.setButtonText('Pull all (overwrite local)').setWarning().onClick(async () => {
+          await this.plugin.pullAll();
+        }),
+      );
+
     new Setting(containerEl)
       .setName('Test connection')
+      .setDesc('Checks your keys against the bucket. If your PC clock is off, the plugin now auto-corrects it from the server.')
       .addButton((b) =>
-        b.setButtonText('Test').setCta().onClick(async () => {
+        b.setButtonText('Test').onClick(async () => {
           await this.plugin.testConnection();
         }),
       );

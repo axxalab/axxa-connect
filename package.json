@@ -1,6 +1,6 @@
 {
   "name": "axxa-connect",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Obsidian plugin to sync your vault to Cloudflare R2 (S3) as plain files.",
   "main": "main.js",
   "scripts": {

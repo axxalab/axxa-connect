@@ -10,10 +10,13 @@ never leave the app.
 
 ## Features
 
-- One-way and manual sync with Cloudflare R2 (or any S3-compatible endpoint)
+- **Two-way sync** with Cloudflare R2 (or any S3-compatible endpoint) — one button
+  sends and receives only what changed since the last sync
 - Push the current note, or the whole vault, to R2
 - Pull the whole vault from R2
 - Optional **push on save** (debounced)
+- **Automatic clock-skew correction** — if the machine's clock is off, the plugin
+  reads the server time and retries, so SigV4 keeps working on desktop and mobile
 - Plain `.md` files in the bucket — readable by scripts, backups and AI tools
 - Optional inclusion of non-markdown attachments (images, PDFs, …)
 
@@ -62,13 +65,15 @@ npm run build   # produces main.js
 
 | Command | Description |
 |---------|-------------|
+| Sync vault with R2 (two-way) | Sends and receives only what changed |
 | Push current file to R2 | Uploads the active note |
 | Push entire vault to R2 | Uploads every file |
 | Pull entire vault from R2 | Downloads everything (overwrites local) |
 | Test R2 connection | Validates credentials |
 
-A cloud ribbon icon pushes the whole vault, and **Push on save** enables
-automatic per-file upload.
+The **↻ ribbon icon** runs a two-way sync, and the same buttons (Sync / Push all /
+Pull all) are available under **Settings → Axxa Connect → Actions**. **Push on save**
+enables automatic per-file upload.
 
 ## Security
 
@@ -77,14 +82,16 @@ automatic per-file upload.
 - Use a token scoped **only** to your vault bucket, and revoke/rotate it anytime
   from the Cloudflare dashboard.
 
-## Limitations (v0.1)
+## Limitations
 
-- Conflict resolution is **last-write-wins** (no merge). Avoid editing the same
-  note in two places without syncing first.
-- Deletions are not propagated automatically (deleting a note locally does not
-  remove it from R2).
+- Two-way sync tracks changes with the local file's modified time and the remote
+  ETag. Conflicts (a file changed on **both** sides since the last sync) are
+  resolved **last-write-wins by newest timestamp** — there is no line-level merge.
+- Deletions are **not** propagated. Deleting a note on one side does not remove it
+  on the other; on the next sync it is treated as a new file and re-created. Delete
+  it on both sides (or clear the bucket) if you really want it gone.
 
-Incremental sync (by hash) and deletion propagation are on the roadmap.
+Deletion propagation and content-hash change detection are on the roadmap.
 
 ## License
 

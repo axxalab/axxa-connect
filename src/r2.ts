@@ -15,6 +15,8 @@ export interface R2Config {
 export interface R2Object {
   key: string;
   size: number;
+  lastModified: number; // epoch ms (0 if unknown)
+  etag: string; // sem aspas
 }
 
 const enc = new TextEncoder();
@@ -56,26 +58,34 @@ function awsUriEncode(str: string, encodeSlash = true): string {
   return out;
 }
 
-function amzDates(): { amzDate: string; dateStamp: string } {
-  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
-  return { amzDate, dateStamp: amzDate.slice(0, 8) };
-}
-
 export class R2Client {
+  // Diferença (ms) entre o relógio do servidor R2 e o local. Corrige o caso em
+  // que o PC está com a hora errada e o SigV4 falha (RequestTimeTooSkewed) —
+  // problema comum no desktop quando o mesmo bucket conecta normal no mobile.
+  private clockOffsetMs = 0;
+
   constructor(private cfg: R2Config) {}
 
   get host(): string {
     return `${this.cfg.accountId}.r2.cloudflarestorage.com`;
   }
 
+  private amzDates(): { amzDate: string; dateStamp: string } {
+    const amzDate = new Date(Date.now() + this.clockOffsetMs)
+      .toISOString()
+      .replace(/[:-]|\.\d{3}/g, '');
+    return { amzDate, dateStamp: amzDate.slice(0, 8) };
+  }
+
   private async signAndSend(
     method: string,
     key: string,
     opts: { query?: Record<string, string>; body?: ArrayBuffer | string; contentType?: string } = {},
+    retried = false,
   ): Promise<RequestUrlResponse> {
     const { cfg } = this;
     const { query = {}, body, contentType } = opts;
-    const { amzDate, dateStamp } = amzDates();
+    const { amzDate, dateStamp } = this.amzDates();
 
     const canonicalUri = '/' + cfg.bucket + (key ? '/' + awsUriEncode(key, false) : '');
     const canonicalQuery = Object.keys(query)
@@ -135,10 +145,31 @@ export class R2Client {
     });
 
     if (res.status < 200 || res.status >= 300) {
-      const msg = (res.text.match(/<Message>([^<]+)<\/Message>/) || [])[1] || `HTTP ${res.status}`;
-      throw new Error(`R2 ${method} ${key || '(bucket)'} -> ${res.status}: ${msg}`);
+      // Se o relógio local estiver defasado, o R2 responde 403 e envia a hora
+      // certa no header `Date`. Sincronizamos o offset e repetimos UMA vez.
+      if (!retried && res.status === 403) {
+        const serverDate = this.headerVal(res, 'date');
+        const serverMs = serverDate ? Date.parse(serverDate) : NaN;
+        if (!Number.isNaN(serverMs) && Math.abs(serverMs - (Date.now() + this.clockOffsetMs)) > 5000) {
+          this.clockOffsetMs = serverMs - Date.now();
+          return this.signAndSend(method, key, opts, true);
+        }
+      }
+      const code = (res.text.match(/<Code>([^<]+)<\/Code>/) || [])[1];
+      const msg = (res.text.match(/<Message>([^<]+)<\/Message>/) || [])[1];
+      const detail = [code, msg].filter(Boolean).join(': ') || `HTTP ${res.status}`;
+      throw new Error(`R2 ${method} ${key || '(bucket)'} -> ${res.status} ${detail}`);
     }
     return res;
+  }
+
+  // requestUrl entrega os headers com nomes minúsculos no desktop e podem vir
+  // com capitalização variada no mobile — lê de forma case-insensitive.
+  private headerVal(res: RequestUrlResponse, name: string): string | undefined {
+    const h = res.headers || {};
+    const lower = name.toLowerCase();
+    for (const k of Object.keys(h)) if (k.toLowerCase() === lower) return h[k];
+    return undefined;
   }
 
   async testConnection(): Promise<void> {
@@ -155,9 +186,22 @@ export class R2Client {
       if (token) query['continuation-token'] = token;
       const res = await this.signAndSend('GET', '', { query });
       const xml = res.text;
-      const re = /<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Contents>/g;
+      const re = /<Contents>([\s\S]*?)<\/Contents>/g;
       let m: RegExpExecArray | null;
-      while ((m = re.exec(xml))) out.push({ key: m[1], size: Number(m[2]) });
+      while ((m = re.exec(xml))) {
+        const block = m[1];
+        const key = (block.match(/<Key>([^<]+)<\/Key>/) || [])[1];
+        if (!key) continue;
+        const size = Number((block.match(/<Size>(\d+)<\/Size>/) || [])[1] || 0);
+        const lm = (block.match(/<LastModified>([^<]+)<\/LastModified>/) || [])[1];
+        const etagRaw = (block.match(/<ETag>([^<]+)<\/ETag>/) || [])[1] || '';
+        out.push({
+          key,
+          size,
+          lastModified: lm ? Date.parse(lm) : 0,
+          etag: etagRaw.replace(/&quot;/g, '').replace(/"/g, ''),
+        });
+      }
       const truncated = /<IsTruncated>true<\/IsTruncated>/.test(xml);
       const next = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
       token = truncated && next ? next[1] : undefined;
@@ -175,11 +219,13 @@ export class R2Client {
     return res.arrayBuffer;
   }
 
-  async put(key: string, body: ArrayBuffer | string, contentType?: string): Promise<void> {
+  // Retorna o ETag do objeto criado (sem aspas) para o controle de estado do sync.
+  async put(key: string, body: ArrayBuffer | string, contentType?: string): Promise<string> {
     const ct =
       contentType ||
       (key.endsWith('.md') ? 'text/markdown; charset=utf-8' : 'application/octet-stream');
-    await this.signAndSend('PUT', this.cfg.prefix + key, { body, contentType: ct });
+    const res = await this.signAndSend('PUT', this.cfg.prefix + key, { body, contentType: ct });
+    return (this.headerVal(res, 'etag') || '').replace(/&quot;/g, '').replace(/"/g, '');
   }
 
   async del(key: string): Promise<void> {
