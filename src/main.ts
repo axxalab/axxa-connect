@@ -1,4 +1,4 @@
-import { Notice, Plugin, TAbstractFile, TFile, normalizePath } from 'obsidian';
+import { Notice, Plugin, TAbstractFile, TFile, TFolder, normalizePath } from 'obsidian';
 import { R2Client, type R2Config, type R2Object } from './r2';
 import {
   AxxaConnectSettingTab,
@@ -25,6 +25,14 @@ type SyncOp =
 export default class AxxaConnectPlugin extends Plugin {
   settings!: AxxaConnectSettings;
   syncState: SyncState = {};
+  // Lápides: caminhos apagados/movidos localmente enquanto o plugin rodava.
+  // Capturamos o evento de exclusão na hora, para o próximo sync ter CERTEZA de
+  // que foi você que apagou (e propagar a exclusão pro R2) em vez de restaurar.
+  // Caminhos de PASTA terminam em '/' e valem como prefixo. Persistido.
+  private pendingDeletes: string[] = [];
+  // True enquanto o sync está escrevendo/apagando no vault, para ignorarmos os
+  // eventos que a nossa própria operação dispara (senão viraria lápide/re-push).
+  private applyingRemote = false;
   private saveTimers = new Map<string, number>();
   private syncing = false;
 
@@ -55,6 +63,7 @@ export default class AxxaConnectPlugin extends Plugin {
     // Optional automatic push on save, debounced per file.
     this.registerEvent(
       this.app.vault.on('modify', (file: TAbstractFile) => {
+        if (this.applyingRemote) return; // mudança causada pelo próprio pull
         if (!this.settings.syncOnSave || !(file instanceof TFile)) return;
         if (!this.shouldSync(file)) return;
         const prev = this.saveTimers.get(file.path);
@@ -66,6 +75,25 @@ export default class AxxaConnectPlugin extends Plugin {
         this.saveTimers.set(file.path, id);
       }),
     );
+
+    // Exclusão local → registra lápide para propagar a remoção no próximo sync.
+    this.registerEvent(
+      this.app.vault.on('delete', (file: TAbstractFile) => {
+        if (this.applyingRemote) return; // remoção feita pelo próprio sync
+        if (file instanceof TFolder) this.recordDeletion(file.path + '/');
+        else if (this.shouldSyncPath(file.path)) this.recordDeletion(file.path);
+      }),
+    );
+
+    // Rename/movimentação → o caminho ANTIGO deve ser removido no R2; o novo
+    // caminho é enviado normalmente (aparece como arquivo local novo/alterado).
+    this.registerEvent(
+      this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
+        if (this.applyingRemote) return;
+        if (file instanceof TFolder) this.recordDeletion(oldPath + '/');
+        else if (this.shouldSyncPath(oldPath)) this.recordDeletion(oldPath);
+      }),
+    );
   }
 
   onunload() {
@@ -75,7 +103,7 @@ export default class AxxaConnectPlugin extends Plugin {
 
   async loadSettings() {
     const data = (await this.loadData()) as
-      | { settings?: AxxaConnectSettings; syncState?: SyncState }
+      | { settings?: AxxaConnectSettings; syncState?: SyncState; pendingDeletes?: string[] }
       | AxxaConnectSettings
       | null;
     // Compatível com o formato antigo (settings salvas na raiz do data.json).
@@ -88,14 +116,43 @@ export default class AxxaConnectPlugin extends Plugin {
       data && typeof data === 'object' && 'syncState' in (data as object)
         ? (data as { syncState?: SyncState }).syncState ?? {}
         : {};
+    this.pendingDeletes =
+      data && typeof data === 'object' && 'pendingDeletes' in (data as object)
+        ? (data as { pendingDeletes?: string[] }).pendingDeletes ?? []
+        : [];
   }
 
   private async persist() {
-    await this.saveData({ settings: this.settings, syncState: this.syncState });
+    await this.saveData({
+      settings: this.settings,
+      syncState: this.syncState,
+      pendingDeletes: this.pendingDeletes,
+    });
   }
 
   async saveSettings() {
     await this.persist();
+  }
+
+  private shouldSyncPath(path: string): boolean {
+    return this.settings.includeNonMarkdown || path.endsWith('.md');
+  }
+
+  // Registra uma lápide (exclusão/movimentação local) e persiste na hora, para
+  // sobreviver a um reload até o próximo sync propagar a remoção.
+  private recordDeletion(path: string) {
+    if (!this.pendingDeletes.includes(path)) {
+      this.pendingDeletes.push(path);
+      void this.persist();
+    }
+  }
+
+  // Um caminho remoto casa com uma lápide se for igual a ela, ou se estiver
+  // dentro de uma lápide de pasta (que termina em '/').
+  private isTombstoned(path: string, tombstones: Set<string>): boolean {
+    if (tombstones.has(path)) return true;
+    for (const t of tombstones) if (t.endsWith('/') && path.startsWith(t)) return true;
+    return false;
   }
 
   private config(): R2Config | null {
@@ -171,6 +228,7 @@ export default class AxxaConnectPlugin extends Plugin {
     const r2 = this.client();
     if (!r2) return;
     const notice = new Notice('Axxa Connect: pulling from R2...', 0);
+    this.applyingRemote = true;
     try {
       const objects = await r2.list('');
       let done = 0;
@@ -188,6 +246,8 @@ export default class AxxaConnectPlugin extends Plugin {
     } catch (e) {
       notice.hide();
       new Notice(`Axxa Connect: pull error — ${(e as Error).message}`);
+    } finally {
+      this.applyingRemote = false;
     }
   }
 
@@ -226,6 +286,7 @@ export default class AxxaConnectPlugin extends Plugin {
 
       // 2) Decide a operação de cada caminho.
       const propagate = this.settings.propagateDeletes;
+      const tombstones = new Set(this.pendingDeletes);
       const ops: SyncOp[] = [];
       const paths = new Set<string>([
         ...localMap.keys(),
@@ -268,7 +329,12 @@ export default class AxxaConnectPlugin extends Plugin {
             ops.push({ kind: 'push', path, file: local });
           }
         } else if (!local && remote) {
-          if (state && propagate && !remoteChanged) {
+          if (propagate && this.isTombstoned(path, tombstones)) {
+            // CERTEZA de que foi apagado/movido localmente (evento capturado) →
+            // apaga no R2, mesmo sem estado base. É isto que faz o delete
+            // funcionar de primeira em vez de restaurar.
+            ops.push({ kind: 'delRemote', path, remote });
+          } else if (state && propagate && !remoteChanged) {
             // Existia localmente e sumiu → foi apagado/movido aqui → apaga remoto.
             ops.push({ kind: 'delRemote', path, remote });
           } else if (state && propagate && remoteChanged) {
@@ -285,32 +351,43 @@ export default class AxxaConnectPlugin extends Plugin {
         }
       }
 
-      // 3) Executa em paralelo com limite de concorrência.
+      // 3) Executa em paralelo com limite de concorrência. Marca applyingRemote
+      // para ignorar os eventos disparados pelas nossas próprias escritas/remoções.
       let done = 0;
-      await this.runPool(ops, 6, async (op) => {
-        try {
-          if (op.kind === 'push') {
-            await this.pushOne(r2, op.file);
-            pushed++;
-          } else if (op.kind === 'pull') {
-            await this.pullOne(r2, op.path, op.remote);
-            pulled++;
-          } else if (op.kind === 'delRemote') {
-            await r2.del(op.path);
-            delete this.syncState[op.path];
-            removed++;
-          } else if (op.kind === 'delLocal') {
-            await this.trashLocal(op.path);
-            delete this.syncState[op.path];
-            removed++;
+      this.applyingRemote = true;
+      try {
+        await this.runPool(ops, 6, async (op) => {
+          try {
+            if (op.kind === 'push') {
+              await this.pushOne(r2, op.file);
+              pushed++;
+            } else if (op.kind === 'pull') {
+              await this.pullOne(r2, op.path, op.remote);
+              pulled++;
+            } else if (op.kind === 'delRemote') {
+              await r2.del(op.path);
+              delete this.syncState[op.path];
+              removed++;
+            } else if (op.kind === 'delLocal') {
+              await this.trashLocal(op.path);
+              delete this.syncState[op.path];
+              removed++;
+            }
+          } catch (e) {
+            console.error(`Axxa Connect: sync op failed (${op.kind} ${op.path})`, e);
+            errors++;
+          } finally {
+            notice.setMessage(`Axxa Connect: syncing… ${++done}/${ops.length}`);
           }
-        } catch (e) {
-          console.error(`Axxa Connect: sync op failed (${op.kind} ${op.path})`, e);
-          errors++;
-        } finally {
-          notice.setMessage(`Axxa Connect: syncing… ${++done}/${ops.length}`);
-        }
-      });
+        });
+      } finally {
+        this.applyingRemote = false;
+      }
+
+      // Lápides processadas neste sync. Se algum delRemote falhou, o estado
+      // continua servindo de backstop (arquivo em estado + ausente local →
+      // delRemote de novo no próximo sync).
+      this.pendingDeletes = [];
 
       await this.persist();
       notice.hide();

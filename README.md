@@ -13,9 +13,12 @@ never leave the app.
 - **Two-way sync** with Cloudflare R2 (or any S3-compatible endpoint) — one button
   sends and receives only what changed since the last sync, running transfers in
   parallel for speed
-- **Move & delete propagation** — moving or deleting a file on one device applies
-  the same change on the other (three-way diff: local × remote × last-sync state),
-  so you never end up with duplicate copies. Can be turned off in settings.
+- **Move & delete propagation** — moving or deleting a file (or folder) on one
+  device applies the same change on the other, so you never end up with duplicate
+  copies. Deletes and renames are captured live (vault events → tombstones), so a
+  deletion propagates on the very next sync instead of being restored, even
+  without a prior baseline sync. Falls back to a three-way diff (local × remote ×
+  last-sync state). Can be turned off in settings.
 - Push the current note, or the whole vault, to R2
 - Pull the whole vault from R2
 - Optional **push on save** (debounced)
