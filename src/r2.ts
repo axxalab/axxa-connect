@@ -95,16 +95,26 @@ export class R2Client {
 
     const payloadHash = body != null ? await sha256Hex(body) : EMPTY_SHA256;
 
-    const headers: Record<string, string> = {
+    // O `host` PRECISA entrar na assinatura (SigV4), mas NÃO pode ser enviado
+    // como header manual: o Electron (Obsidian desktop) rejeita com
+    // net::ERR_INVALID_ARGUMENT ao definir `Host` explicitamente. O transport
+    // já adiciona o Host correto a partir da URL, então assinamos com host e
+    // enviamos só os demais headers. (No mobile o header manual funcionava; por
+    // isso conectava no celular e falhava no desktop.)
+    const signedValues: Record<string, string> = {
       host: this.host,
       'x-amz-content-sha256': payloadHash,
       'x-amz-date': amzDate,
     };
-    if (contentType) headers['content-type'] = contentType;
+    if (contentType) signedValues['content-type'] = contentType;
 
-    const signedHeaderNames = Object.keys(headers).sort();
-    const canonicalHeaders = signedHeaderNames.map((h) => `${h}:${headers[h]}\n`).join('');
+    const signedHeaderNames = Object.keys(signedValues).sort();
+    const canonicalHeaders = signedHeaderNames.map((h) => `${h}:${signedValues[h]}\n`).join('');
     const signedHeaders = signedHeaderNames.join(';');
+
+    // Headers efetivamente enviados: tudo que foi assinado, exceto `host`.
+    const sendHeaders: Record<string, string> = {};
+    for (const h of signedHeaderNames) if (h !== 'host') sendHeaders[h] = signedValues[h];
 
     const canonicalRequest = [
       method,
@@ -139,7 +149,7 @@ export class R2Client {
     const res = await requestUrl({
       url,
       method,
-      headers: { ...headers, authorization },
+      headers: { ...sendHeaders, authorization },
       body,
       throw: false,
     });
