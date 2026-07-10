@@ -19,13 +19,21 @@ never leave the app.
   deletion propagates on the very next sync instead of being restored, even
   without a prior baseline sync. Falls back to a three-way diff (local × remote ×
   last-sync state). Can be turned off in settings.
-- Push the current note, or the whole vault, to R2
-- Pull the whole vault from R2
-- Optional **push on save** (debounced)
+- **Automatic sync** — on startup, on a timer, and a few seconds after you change
+  files (debounced). A status-bar item shows sync state and last-sync time and
+  syncs when clicked.
+- **Conflict safety** — if the same file changed on both sides since the last
+  sync, the newest stays in place and the other side is saved as a
+  `Note (conflict …).md` copy. Last-write-wins is available as an option.
+- **Resilient transfers** — parallel, with automatic retry/backoff on transient
+  network errors (no retry on permission errors).
 - **Automatic clock-skew correction** — if the machine's clock is off, the plugin
-  reads the server time and retries, so SigV4 keeps working on desktop and mobile
-- Plain `.md` files in the bucket — readable by scripts, backups and AI tools
-- Optional inclusion of non-markdown attachments (images, PDFs, …)
+  reads the server time and retries, so SigV4 keeps working on desktop and mobile.
+- **Read + write connection test** — the Test button verifies the token can both
+  read and write, catching a read-only token immediately.
+- Push the current note, or the whole vault, to R2; pull the whole vault from R2.
+- Plain `.md` files in the bucket — readable by scripts, backups and AI tools.
+- Optional inclusion of non-markdown attachments (images, PDFs, …).
 
 ## Why plain files?
 
@@ -78,9 +86,10 @@ npm run build   # produces main.js
 | Pull entire vault from R2 | Downloads everything (overwrites local) |
 | Test R2 connection | Validates credentials |
 
-The **↻ ribbon icon** runs a two-way sync, and the same buttons (Sync / Push all /
-Pull all) are available under **Settings → Axxa Connect → Actions**. **Push on save**
-enables automatic per-file upload.
+The **↻ ribbon icon** and the **status-bar item** both run a two-way sync; the
+same buttons (Sync / Push all / Pull all) are under **Settings → Axxa Connect →
+Actions**. With **Auto-sync** on (default), you rarely need them — it syncs on
+startup, on a timer, and after you change files.
 
 ## Security
 
@@ -89,21 +98,31 @@ enables automatic per-file upload.
 - Use a token scoped **only** to your vault bucket, and revoke/rotate it anytime
   from the Cloudflare dashboard.
 
+## How sync decides
+
+Change detection uses the local file's modified time and the remote ETag against
+each device's **last-sync state** (in `data.json`), plus **tombstones** captured
+live from delete/rename events. For each path:
+
+- changed on one side only → copied that direction;
+- changed on **both** sides → **conflict**: newest kept in place, the other saved
+  as a `(conflict …)` copy (or last-write-wins if you turn that off);
+- deleted/moved on one side → removed on the other (local deletions go to the
+  vault **trash**, recoverable);
+- delete-vs-edit → the edited version always wins (never lost).
+
 ## Limitations
 
-- Two-way sync tracks changes with the local file's modified time and the remote
-  ETag. Conflicts (a file changed on **both** sides since the last sync) are
-  resolved **last-write-wins by newest timestamp** — there is no line-level merge.
-- Moves and deletions are propagated using each device's **last-sync state**
-  (stored in `data.json`). If that state is missing (fresh install, or the file
-  was never synced from this device), a deletion on the other side can't be told
-  apart from a brand-new file, so the file is re-created instead of removed — a
-  safe fallback that never loses data. Local deletions are moved to the vault
-  **trash**, so they're recoverable.
-- A move is handled as delete-at-old-path + create-at-new-path. On R2 (like S3)
-  there is no atomic rename, so the object is re-uploaded under the new key.
+- No line-level merge — conflicts are resolved at the file level (keep both).
+- If a device's last-sync state is missing (fresh install) **and** the deletion
+  wasn't captured as a live tombstone (e.g. deleted while Obsidian was closed), a
+  remote-only file can't be told apart from a new one, so it's re-created rather
+  than removed — a safe fallback that never loses data. Run one sync to establish
+  the baseline.
+- A move is delete-at-old-path + create-at-new-path. On R2 (like S3) there is no
+  atomic rename, so the object is re-uploaded under the new key.
 
-Content-hash change detection is on the roadmap.
+Content-hash change detection and server-side move (copy) are on the roadmap.
 
 ## License
 

@@ -11,6 +11,12 @@ export interface AxxaConnectSettings {
   syncOnSave: boolean;
   includeNonMarkdown: boolean;
   propagateDeletes: boolean;
+  // Automatic sync
+  autoSync: boolean;
+  autoSyncInterval: number; // minutes
+  syncOnStartup: boolean;
+  // Conflict handling
+  conflictCopies: boolean;
 }
 
 export const DEFAULT_SETTINGS: AxxaConnectSettings = {
@@ -23,6 +29,10 @@ export const DEFAULT_SETTINGS: AxxaConnectSettings = {
   syncOnSave: false,
   includeNonMarkdown: false,
   propagateDeletes: true,
+  autoSync: true,
+  autoSyncInterval: 5,
+  syncOnStartup: true,
+  conflictCopies: true,
 };
 
 // Normalizes the prefix: no leading slash, trailing slash when non-empty.
@@ -106,9 +116,59 @@ export class AxxaConnectSettingTab extends PluginSettingTab {
         }),
       );
 
+    // --- Automatic sync ---
+    containerEl.createEl('h3', { text: 'Automatic sync' });
+
+    new Setting(containerEl)
+      .setName('Auto-sync')
+      .setDesc('Sync automatically: on startup, on a timer, and shortly after you change files. Turn off to sync only with the button/command.')
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoSync).onChange(async (v) => {
+          this.plugin.settings.autoSync = v;
+          await save();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('Auto-sync interval')
+      .setDesc('Minutes between automatic syncs (catches changes from your other devices).')
+      .addText((t) =>
+        t
+          .setPlaceholder('5')
+          .setValue(String(this.plugin.settings.autoSyncInterval))
+          .onChange(async (v) => {
+            const n = Math.max(1, Math.floor(Number(v) || 0));
+            this.plugin.settings.autoSyncInterval = n || 5;
+            await save();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Sync on startup')
+      .setDesc('Run a sync a few seconds after Obsidian opens.')
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.syncOnStartup).onChange(async (v) => {
+          this.plugin.settings.syncOnStartup = v;
+          await save();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('Push on save (single file)')
+      .setDesc('Also upload just the active file immediately when it is modified (debounced). Independent from auto-sync.')
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.syncOnSave).onChange(async (v) => {
+          this.plugin.settings.syncOnSave = v;
+          await save();
+        }),
+      );
+
+    // --- Sync behavior ---
+    containerEl.createEl('h3', { text: 'Sync behavior' });
+
     new Setting(containerEl)
       .setName('Propagate moves & deletions')
-      .setDesc('When a file is moved or deleted on one device, apply the same change on the other side (two-way). Local deletions go to the vault trash (recoverable). Turn off to never delete/move — files are only ever added or updated.')
+      .setDesc('When a file is moved or deleted on one device, apply the same change on the other (two-way). Local deletions go to the vault trash (recoverable). Turn off to never delete/move — files are only ever added or updated.')
       .addToggle((t) =>
         t.setValue(this.plugin.settings.propagateDeletes).onChange(async (v) => {
           this.plugin.settings.propagateDeletes = v;
@@ -117,20 +177,21 @@ export class AxxaConnectSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName('Push on save')
-      .setDesc('Automatically upload each file to R2 when it is modified (debounced).')
+      .setName('Keep both on conflict')
+      .setDesc('If the same file changed on both sides since the last sync, keep the newest in place and save the other as a "(conflict …)" copy instead of discarding it. Turn off for last-write-wins (the older version is lost).')
       .addToggle((t) =>
-        t.setValue(this.plugin.settings.syncOnSave).onChange(async (v) => {
-          this.plugin.settings.syncOnSave = v;
+        t.setValue(this.plugin.settings.conflictCopies).onChange(async (v) => {
+          this.plugin.settings.conflictCopies = v;
           await save();
         }),
       );
 
+    // --- Actions ---
     containerEl.createEl('h3', { text: 'Actions' });
 
     new Setting(containerEl)
       .setName('Sync now')
-      .setDesc('Two-way sync: sends and receives only what changed. Conflicts keep the newest version. Nothing is deleted.')
+      .setDesc('Two-way sync: sends and receives only what changed. Conflicts keep both versions. Nothing is lost.')
       .addButton((b) =>
         b.setButtonText('Sync').setCta().onClick(async () => {
           await this.plugin.syncAll();
@@ -153,7 +214,7 @@ export class AxxaConnectSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Test connection')
-      .setDesc('Checks your keys against the bucket. If your PC clock is off, the plugin now auto-corrects it from the server.')
+      .setDesc('Checks your keys against the bucket and verifies read AND write access (a read-only token cannot upload or delete).')
       .addButton((b) =>
         b.setButtonText('Test').onClick(async () => {
           await this.plugin.testConnection();
